@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "api";
+
+import "google/protobuf/timestamp.proto";
+
+message Job {
+	string id = 1;
+	string queue = 2;
+	bytes spec = 3;
+	bytes state = 4;
+	map<string,string> labels = 5;
+	google.protobuf.Timestamp created_at = 6;
+	google.protobuf.Timestamp started_at = 7;
+	google.protobuf.Timestamp updated_at = 8;
+	google.protobuf.Timestamp finished_at = 9;
+}
+
+message CronJob {
+	string id = 1;
+	string name = 2;
+	string queue = 3;
+	bytes spec = 4;
+	string cron = 5;
+	map<string,string> labels = 6;
+	google.protobuf.Timestamp created_at = 7;
+	google.protobuf.Timestamp next_run_at = 8;
+}
+
+message CreateJobRequest {
+	string queue = 1;
+	bytes spec = 2;
+	map<string,string> labels = 3;
+}
+
+message ListenRequest {
+	string queue = 1;
+}
+
+message HeartbeatRequest {
+	string job_id = 1;
+	bytes state = 2;
+	bool finished = 3;
+}
+
+message GetRequest {
+	string id = 1;
+	string name = 2;
+}
+
+message DeleteRequest {
+	string id = 1;
+	string name = 2;
+}
+
+message ListRequest {
+	repeated string queues = 1;
+	map<string,string> labels = 2;
+	bool exclude_finished = 3;
+}
+
+message CreateCronJobRequest {
+	string queue = 1;
+	string name = 2;
+	map<string,string> labels = 3;
+	bytes spec = 4;
+	string cron = 5;
+}
+
+message AquireRequest {
+	string id = 1;
+}
+
+message AquireResponse {
+	string id = 1;
+}
+
+message HoldRequest {
+	string id = 1;
+}
+
+message HoldResponse {
+	string id = 1;
+}
+
+message ReleaseRequest {
+	string id = 1;
+}
+
+message ReleaseResponse {
+	string id = 1;
+}
+
+message Event {
+	string id = 1;
+	string topic = 2;
+	map<string,string> labels = 3;
+	uint64 sequence = 4;
+	google.protobuf.Timestamp created_at = 5;
+	bytes payload = 6;
+}
+
+message PublishRequest {
+	string topic = 1;
+	map<string,string> labels = 2;
+	bytes payload = 6;
+}
+
+message SubscribeRequest {
+	string topic = 1;
+	map<string,string> labels = 2;
+	uint64 since_sequence = 3;
+	google.protobuf.Timestamp since_created_at = 4;
+}
+
+service Jobs {
+	rpc Create(CreateJobRequest) returns (Job);
+	rpc Listen(ListenRequest) returns (stream Job);
+	rpc Heartbeat(HeartbeatRequest) returns (Job);
+	rpc Get(GetRequest) returns (Job);
+	rpc Delete(DeleteRequest) returns (Job);
+	rpc List(ListRequest) returns (stream Job);
+}
+
+service CronJobs {
+	rpc Create(CreateCronJobRequest) returns (CronJob);
+	rpc Get(GetRequest) returns (CronJob);
+	rpc Delete(DeleteRequest) returns (CronJob);
+	rpc List(ListRequest) returns (stream CronJob);
+}
+
+service Locks {
+	rpc Aquire(AquireRequest) returns (AquireResponse);
+	rpc Hold(HoldRequest) returns (HoldResponse);
+	rpc Release(ReleaseRequest) returns (ReleaseResponse);
+}
+
+service Events {
+	rpc Publish(PublishRequest) returns (Event);
+	rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
