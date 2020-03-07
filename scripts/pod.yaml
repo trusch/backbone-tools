@@ -1,0 +1,28 @@
+# Created with podman-1.8.0
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: backbone-tools
+  name: backbone-tools
+spec:
+  containers:
+  - name: backbone-tools-server
+    image: docker.io/trusch/backbone-tools:latest
+    env:
+    - name: PLATFORMCTL_DISABLE_TLS
+      value: "true"
+    ports:
+    - containerPort: 3001
+      hostPort: 3001
+      protocol: TCP
+  - name: postgres
+    image: docker.io/library/postgres:latest
+    command:
+    - postgres
+    env:
+    - name: PGDATA
+      value: /var/lib/postgresql/data
+    - name: POSTGRES_PASSWORD
+      value: postgres
+
