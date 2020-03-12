@@ -77,7 +77,7 @@ func init() {
 	rootCmd.PersistentFlags().String("ca", "", "ca certificate to use")
 	rootCmd.PersistentFlags().Bool("disable-tls", false, "disable")
 	rootCmd.PersistentFlags().String("log-level", "INFO", "log level")
-	viper.SetEnvPrefix("PLATFORMCTL")
+	viper.SetEnvPrefix("BACKBONECTL")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.BindPFlags(rootCmd.PersistentFlags())
 }
