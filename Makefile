@@ -15,16 +15,25 @@ image: go.mod go.sum $(shell find ./ -name "*.go")
 install:
 	go install -v ./cmd/...
 
+start: start-pod
+stop: stop-pod
+
+# podman dev workflow
 start-pod:
 	podman pod create --name backbone-tools -p 3001:3001
 	podman run --pod backbone-tools -d --name postgres -e POSTGRES_PASSWORD=postgres postgres
 	podman run --pod backbone-tools -d --name backbone-tools-server ${IMAGE}
-
 stop-pod:
 	podman pod kill backbone-tools
 	podman pod rm backbone-tools
-
 restart-server:
 	podman kill backbone-tools-server
 	podman rm backbone-tools-server
 	podman run --pod backbone-tools -d --name backbone-tools-server ${IMAGE}
+
+# docker dev workflow
+start-docker:
+	docker run -d --rm --name postgres -e POSTGRES_PASSWORD=postgres postgres
+	docker run -d --rm --name backbone-tools-server --link postgres -p3001:3001 ${IMAGE} "--db=postgres://postgres@postgres:5432?sslmode=disable&password=postgres"
+stop-docker:
+	docker kill postgres backbone-tools-server
