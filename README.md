@@ -23,15 +23,13 @@ alias bctl="${CONTAINER_ENGINE} exec -it backbone-tools-server backbonectl"
 
 ```bash
 bctl jobs create --queue q1 --spec '{"foo":"bar"}'
-bctl jobs listen --queue q1 # blocks until a job occurs
+bctl jobs list --queue q1
 {
   "id": "2ad4a365-0bc7-4c4b-93ed-defbc52fcb16",
   "queue": "q1",
   "spec": "eyJmb28iOiJiYXIifQ==",
   "createdAt": "2020-03-12T09:29:41.287106Z"
 }
-CTRL-C
-
 bctl jobs heartbeat --id 2ad4a365-0bc7-4c4b-93ed-defbc52fcb16 --status '{"progress": "50%"}'
 bctl jobs heartbeat --id 2ad4a365-0bc7-4c4b-93ed-defbc52fcb16 --status '{"progress": "100%"}' --finished
 bctl jobs list
@@ -59,7 +57,7 @@ bctl cronjobs create --queue q1 --spec '{"foo":"bar"}' --cron "@every 5m" --name
   "createdAt": "2020-03-12T09:33:06.677779248Z",
   "nextRunAt": "2020-03-12T09:33:06.677779248Z"
 }
-bctl jobs list # This is not "listen"! It doesn't block and don't mark jobs as started
+bctl jobs list
 [...]
 {
   "id": "cb1e9800-de9d-4fd0-b7ab-010e68ceea64",
