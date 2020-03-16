@@ -9,13 +9,14 @@ import (
 
 	"github.com/Masterminds/squirrel"
 	dbtypes "github.com/contiamo/go-base/pkg/db/serialization"
-	"github.com/trusch/backbone-tools/pkg/api"
-	"github.com/trusch/backbone-tools/pkg/sqlizers"
-	"github.com/trusch/backbone-tools/pkg/ticker"
+	"github.com/contiamo/go-base/pkg/tracing"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/jackc/pgx/v4"
 	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
+	"github.com/trusch/backbone-tools/pkg/api"
+	"github.com/trusch/backbone-tools/pkg/sqlizers"
+	"github.com/trusch/backbone-tools/pkg/ticker"
 )
 
 var (
@@ -24,11 +25,16 @@ var (
 )
 
 func NewServer(ctx context.Context, db *sql.DB, connectString string) (api.JobsServer, error) {
-	srv := &jobsServer{db, connectString}
+	srv := &jobsServer{
+		Tracer:        tracing.NewTracer("jobs", "JobsServer"),
+		db:            db,
+		connectString: connectString,
+	}
 	return srv, srv.init(ctx)
 }
 
 type jobsServer struct {
+	tracing.Tracer
 	db            squirrel.StdSqlCtx
 	connectString string
 }
@@ -56,7 +62,11 @@ func (s *jobsServer) getBuilder(db squirrel.BaseRunner) squirrel.StatementBuilde
 		RunWith(db)
 }
 
-func (s *jobsServer) Create(ctx context.Context, req *api.CreateJobRequest) (*api.Job, error) {
+func (s *jobsServer) Create(ctx context.Context, req *api.CreateJobRequest) (job *api.Job, err error) {
+	span, ctx := s.StartSpan(ctx, "Create")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
 	id := uuid.NewV4().String()
 	now := time.Now()
 	nowProto, err := ptypes.TimestampProto(now)
@@ -67,6 +77,11 @@ func (s *jobsServer) Create(ctx context.Context, req *api.CreateJobRequest) (*ap
 	if req.Labels == nil {
 		req.Labels = make(map[string]string)
 	}
+
+	span.SetTag("job_id", id)
+	span.SetTag("queue", req.GetQueue())
+	span.SetTag("spec", string(req.GetSpec()))
+	span.SetTag("labels", req.GetLabels())
 
 	_, err = s.getBuilder(s.db).Insert("jobs").Columns(
 		"job_id",
@@ -99,30 +114,42 @@ func (s *jobsServer) Create(ctx context.Context, req *api.CreateJobRequest) (*ap
 	}, nil
 }
 
-func (s *jobsServer) Listen(req *api.ListenRequest, resp api.Jobs_ListenServer) error {
-	notifyConn, err := pgx.Connect(resp.Context(), s.connectString)
+func (s *jobsServer) Listen(req *api.ListenRequest, resp api.Jobs_ListenServer) (err error) {
+	span, ctx := s.StartSpan(resp.Context(), "Listen")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+
+	span.SetTag("queue", req.GetQueue())
+
+	notifyConn, err := pgx.Connect(ctx, s.connectString)
 	if err != nil {
 		return err
 	}
 
 	ticker := ticker.New(pollInterval, 0.1, notifyConn, req.GetQueue())
-	if err := ticker.Start(resp.Context()); err != nil {
+	if err := ticker.Start(ctx); err != nil {
 		return err
 	}
 	for {
 		select {
-		case <-resp.Context().Done():
-			return resp.Context().Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-ticker.C:
 			var job *api.Job
 			// start tx in lambda to use defer syntax
 			err := func() (err error) {
+				span, ctx := s.StartSpan(ctx, "startJob")
+				defer func() {
+					s.FinishSpan(span, err)
+				}()
+
 				// setup tx
 				rawDB, ok := s.db.(*sql.DB)
 				if !ok {
 					return errors.New("can not listen withing transactions")
 				}
-				tx, err := rawDB.BeginTx(resp.Context(), &sql.TxOptions{
+				tx, err := rawDB.BeginTx(ctx, &sql.TxOptions{
 					Isolation: sql.LevelSerializable,
 				})
 				if err != nil {
@@ -139,10 +166,14 @@ func (s *jobsServer) Listen(req *api.ListenRequest, resp api.Jobs_ListenServer) 
 				}()
 
 				// get job
-				job, err = s.getJob(resp.Context(), tx, req.GetQueue())
+				job, err = s.getJob(ctx, tx, req.GetQueue())
 				if err != nil {
 					return err
 				}
+
+				span.SetTag("job_id", job.GetId())
+				span.SetTag("queue", job.GetQueue())
+				span.SetTag("spec", job.GetSpec())
 
 				// set started_at
 				now := time.Now()
@@ -154,7 +185,7 @@ func (s *jobsServer) Listen(req *api.ListenRequest, resp api.Jobs_ListenServer) 
 					Set("started_at", now).
 					Set("updated_at", now).
 					Where(squirrel.Eq{"job_id": job.GetId()}).
-					ExecContext(resp.Context())
+					ExecContext(ctx)
 				job.StartedAt = nowProto
 
 				return err
@@ -216,7 +247,11 @@ func (s *jobsServer) getJob(ctx context.Context, tx *sql.Tx, queue string) (*api
 	return &job, nil
 }
 
-func (s *jobsServer) Heartbeat(ctx context.Context, req *api.HeartbeatRequest) (*api.Job, error) {
+func (s *jobsServer) Heartbeat(ctx context.Context, req *api.HeartbeatRequest) (job *api.Job, err error) {
+	span, ctx := s.StartSpan(ctx, "Heartbeat")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
 	// setup tx
 	rawDB, ok := s.db.(*sql.DB)
 	if !ok {
@@ -235,7 +270,7 @@ func (s *jobsServer) Heartbeat(ctx context.Context, req *api.HeartbeatRequest) (
 	}()
 
 	// get job
-	job, err := (&jobsServer{tx, ""}).Get(ctx, &api.GetRequest{Id: req.GetJobId()})
+	job, err = (&jobsServer{s.Tracer, tx, ""}).Get(ctx, &api.GetRequest{Id: req.GetJobId()})
 	if err != nil {
 		return nil, err
 	}
@@ -272,15 +307,22 @@ func (s *jobsServer) Heartbeat(ctx context.Context, req *api.HeartbeatRequest) (
 	return job, nil
 }
 
-func (s *jobsServer) Get(ctx context.Context, req *api.GetRequest) (*api.Job, error) {
+func (s *jobsServer) Get(ctx context.Context, req *api.GetRequest) (job *api.Job, err error) {
+	span, ctx := s.StartSpan(ctx, "Get")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("job_id", req.GetId())
+	span.SetTag("name", req.GetName())
+
+	job = &api.Job{}
 	var (
-		job        api.Job
 		createdAt  time.Time
 		updatedAt  *time.Time
 		startedAt  *time.Time
 		finishedAt *time.Time
 	)
-	err := s.getBuilder(s.db).Select("job_id", "spec", "state", "labels", "created_at", "updated_at", "started_at", "finished_at").
+	err = s.getBuilder(s.db).Select("job_id", "spec", "state", "labels", "created_at", "updated_at", "started_at", "finished_at").
 		From("jobs").
 		Where(squirrel.Eq{
 			"job_id": req.GetId(),
@@ -311,10 +353,17 @@ func (s *jobsServer) Get(ctx context.Context, req *api.GetRequest) (*api.Job, er
 			return nil, err
 		}
 	}
-	return &job, nil
+	return job, nil
 }
 
-func (s *jobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (*api.Job, error) {
+func (s *jobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (job *api.Job, err error) {
+	span, ctx := s.StartSpan(ctx, "Delete")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("job_id", req.GetId())
+	span.SetTag("name", req.GetName())
+
 	// setup tx
 	rawDB, ok := s.db.(*sql.DB)
 	if !ok {
@@ -333,7 +382,7 @@ func (s *jobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (*api.J
 	}()
 
 	// get job
-	job, err := (&jobsServer{tx, ""}).Get(ctx, &api.GetRequest{Id: req.GetId(), Name: req.GetName()})
+	job, err = (&jobsServer{s.Tracer, tx, ""}).Get(ctx, &api.GetRequest{Id: req.GetId(), Name: req.GetName()})
 	if err != nil {
 		return nil, err
 	}
@@ -349,10 +398,18 @@ func (s *jobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (*api.J
 	return job, nil
 }
 
-func (s *jobsServer) List(req *api.ListRequest, resp api.Jobs_ListServer) error {
+func (s *jobsServer) List(req *api.ListRequest, resp api.Jobs_ListServer) (err error) {
+	span, ctx := s.StartSpan(resp.Context(), "List")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
 	if req.Labels == nil {
 		req.Labels = make(map[string]string)
 	}
+	span.SetTag("queues", req.GetQueues())
+	span.SetTag("labels", req.GetLabels())
+	span.SetTag("exclude_finished", req.GetExcludeFinished())
+
 	filter := squirrel.And{}
 	if queues := req.GetQueues(); len(queues) > 0 {
 		filter = append(filter, squirrel.Eq{
@@ -372,7 +429,7 @@ func (s *jobsServer) List(req *api.ListRequest, resp api.Jobs_ListServer) error 
 		From("jobs").
 		Where(filter).
 		OrderBy("created_at ASC").
-		QueryContext(resp.Context())
+		QueryContext(ctx)
 	if err != nil {
 		return err
 	}

@@ -27,7 +27,7 @@ start-pod:
 	podman pod create --name backbone-tools -p 3001:3001 -p 8080:8080 -p 16686:16686
 	podman run --pod backbone-tools -d --name postgres -e POSTGRES_PASSWORD=postgres postgres
 	podman run --pod backbone-tools -d --name jaeger jaegertracing/all-in-one:1.17
-	podman run --pod backbone-tools -d --name backbone-tools-server ${IMAGE} --tracing localhost:6831
+	podman run --pod backbone-tools -d --name backbone-tools-server ${IMAGE}
 
 stop-pod:
 	podman pod kill backbone-tools

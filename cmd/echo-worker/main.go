@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/pflag"
 	"github.com/trusch/backbone-tools/pkg/api"
 	"github.com/trusch/backbone-tools/pkg/locks"
 	"github.com/trusch/backbone-tools/pkg/worker"
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"

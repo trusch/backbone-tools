@@ -15,22 +15,23 @@ import (
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
 
+	"github.com/contiamo/go-base/pkg/tracing"
 	"github.com/trusch/backbone-tools/pkg/api"
-	"github.com/trusch/backbone-tools/pkg/cronjobs"
-	"github.com/trusch/backbone-tools/pkg/events"
-	"github.com/trusch/backbone-tools/pkg/jobs"
-	"github.com/trusch/backbone-tools/pkg/locks"
+	"github.com/trusch/backbone-tools/pkg/services/cronjobs"
+	"github.com/trusch/backbone-tools/pkg/services/events"
+	"github.com/trusch/backbone-tools/pkg/services/jobs"
+	"github.com/trusch/backbone-tools/pkg/services/locks"
 )
 
 var (
 	dbStr      = pflag.String("db", "postgres://postgres@localhost:5432?sslmode=disable", "postgres connect string")
 	listenAddr = pflag.String("listen", ":3001", "listening address")
-	tracing    = pflag.String("tracing", "", "tracing endpoint")
 	components = pflag.StringSlice("components", []string{"jobs", "cronjobs", "locks", "events"}, "list of components to start up")
 	key        = pflag.String("key", "", "x509 key file")
 	cert       = pflag.String("cert", "", "x509 cert file")
 	ca         = pflag.String("ca", "", "x509 ca cert file")
 	metrics    = pflag.String("metrics", ":8080", "metrics endpoint")
+	logLevel   = pflag.String("log-level", "INFO", "log level")
 )
 
 func main() {
@@ -42,6 +43,16 @@ func main() {
 		err        error
 		grpcServer *grpc.Server
 	)
+
+	lvl, err := logrus.ParseLevel(*logLevel)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	logrus.SetLevel(lvl)
+
+	if err := tracing.InitJaeger("backbone-tools"); err != nil {
+		logrus.Fatal(err)
+	}
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
@@ -82,10 +93,9 @@ func main() {
 		grpcserver.WithMetrics(),
 		grpcserver.WithRecovery(),
 		grpcserver.WithReflection(),
+		grpcserver.WithTracing("", "backbone-tools"),
 	}
-	if *tracing != "" {
-		opts = append(opts, grpcserver.WithTracing(*tracing, "backbone-tools"))
-	}
+
 	grpcServer, err = grpcserver.New(&grpcserver.Config{
 		Options: opts,
 		Extras: []grpc.ServerOption{

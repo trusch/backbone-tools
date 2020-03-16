@@ -7,13 +7,14 @@ import (
 
 	"github.com/Masterminds/squirrel"
 	dbtypes "github.com/contiamo/go-base/pkg/db/serialization"
-	"github.com/trusch/backbone-tools/pkg/api"
-	"github.com/trusch/backbone-tools/pkg/sqlizers"
+	"github.com/contiamo/go-base/pkg/tracing"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/pkg/errors"
 	"github.com/robfig/cron"
 	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
+	"github.com/trusch/backbone-tools/pkg/api"
+	"github.com/trusch/backbone-tools/pkg/sqlizers"
 )
 
 var (
@@ -22,7 +23,11 @@ var (
 )
 
 func NewServer(ctx context.Context, db *sql.DB, jobsServer api.JobsServer) (api.CronJobsServer, error) {
-	srv := &cronjobsServer{db, jobsServer}
+	srv := &cronjobsServer{
+		Tracer:     tracing.NewTracer("cronjobs", "CronJobsServer"),
+		db:         db,
+		jobsServer: jobsServer,
+	}
 	err := srv.init(ctx)
 	if err != nil {
 		return nil, err
@@ -32,6 +37,7 @@ func NewServer(ctx context.Context, db *sql.DB, jobsServer api.JobsServer) (api.
 }
 
 type cronjobsServer struct {
+	tracing.Tracer
 	db         squirrel.StdSqlCtx
 	jobsServer api.JobsServer
 }
@@ -72,8 +78,20 @@ func (s *cronjobsServer) backend(ctx context.Context) {
 	}
 }
 
-func (s *cronjobsServer) Create(ctx context.Context, req *api.CreateCronJobRequest) (*api.CronJob, error) {
+func (s *cronjobsServer) Create(ctx context.Context, req *api.CreateCronJobRequest) (cronjob *api.CronJob, err error) {
+	span, ctx := s.StartSpan(ctx, "Create")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("name", req.GetName())
+	span.SetTag("cron", req.GetCron())
+	span.SetTag("queue", req.GetQueue())
+	span.SetTag("spec", req.GetSpec())
+	span.SetTag("labels", req.GetLabels())
+
 	id := uuid.NewV4().String()
+	span.SetTag("cronjob_id", id)
+
 	now := time.Now()
 	nowProto, err := ptypes.TimestampProto(now)
 	if err != nil {
@@ -125,9 +143,16 @@ func (s *cronjobsServer) Create(ctx context.Context, req *api.CreateCronJobReque
 
 }
 
-func (s *cronjobsServer) Get(ctx context.Context, req *api.GetRequest) (*api.CronJob, error) {
+func (s *cronjobsServer) Get(ctx context.Context, req *api.GetRequest) (cronjob *api.CronJob, err error) {
+	span, ctx := s.StartSpan(ctx, "Create")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("cronjobs_id", req.GetId())
+	span.SetTag("name", req.GetName())
+
+	cronjob = &api.CronJob{}
 	var (
-		cronjob   api.CronJob
 		createdAt time.Time
 		nextRunAt *time.Time
 	)
@@ -138,7 +163,7 @@ func (s *cronjobsServer) Get(ctx context.Context, req *api.GetRequest) (*api.Cro
 	if name := req.GetName(); name != "" {
 		where = append(where, squirrel.Eq{"name": name})
 	}
-	err := s.getBuilder(s.db).Select("cronjob_id", "name", "labels", "queue", "spec", "cron", "created_at", "next_run_at").
+	err = s.getBuilder(s.db).Select("cronjob_id", "name", "labels", "queue", "spec", "cron", "created_at", "next_run_at").
 		From("cronjobs").
 		Where(where).
 		QueryRowContext(ctx).Scan(&cronjob.Id, &cronjob.Name, dbtypes.JSONBlob(&cronjob.Labels), &cronjob.Queue, &cronjob.Spec, &cronjob.Cron, &createdAt, &nextRunAt)
@@ -155,10 +180,17 @@ func (s *cronjobsServer) Get(ctx context.Context, req *api.GetRequest) (*api.Cro
 			return nil, err
 		}
 	}
-	return &cronjob, nil
+	return cronjob, nil
 }
 
-func (s *cronjobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (*api.CronJob, error) {
+func (s *cronjobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (cronjob *api.CronJob, err error) {
+	span, ctx := s.StartSpan(ctx, "Delete")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("cronjobs_id", req.GetId())
+	span.SetTag("name", req.GetName())
+
 	// setup tx
 	rawDB, ok := s.db.(*sql.DB)
 	if !ok {
@@ -177,7 +209,7 @@ func (s *cronjobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (*a
 	}()
 
 	// get job
-	cronjob, err := (&cronjobsServer{tx, s.jobsServer}).Get(ctx, &api.GetRequest{Id: req.GetId(), Name: req.GetName()})
+	cronjob, err = (&cronjobsServer{s.Tracer, tx, s.jobsServer}).Get(ctx, &api.GetRequest{Id: req.GetId(), Name: req.GetName()})
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +226,11 @@ func (s *cronjobsServer) Delete(ctx context.Context, req *api.DeleteRequest) (*a
 }
 
 func (s *cronjobsServer) scheduleJobs(ctx context.Context) (err error) {
+	span, ctx := s.StartSpan(ctx, "scheduleJobs")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+
 	// setup tx
 	rawDB, ok := s.db.(*sql.DB)
 	if !ok {
@@ -286,7 +323,14 @@ func (s *cronjobsServer) getBuilder(db squirrel.BaseRunner) squirrel.StatementBu
 		RunWith(db)
 }
 
-func (s *cronjobsServer) List(req *api.ListRequest, resp api.CronJobs_ListServer) error {
+func (s *cronjobsServer) List(req *api.ListRequest, resp api.CronJobs_ListServer) (err error) {
+	span, ctx := s.StartSpan(resp.Context(), "List")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("queues", req.GetQueues())
+	span.SetTag("labels", req.GetLabels())
+
 	if req.Labels == nil {
 		req.Labels = make(map[string]string)
 	}
@@ -305,7 +349,7 @@ func (s *cronjobsServer) List(req *api.ListRequest, resp api.CronJobs_ListServer
 		Select("cronjob_id", "name", "labels", "queue", "spec", "cron", "created_at", "next_run_at").
 		From("cronjobs").
 		Where(filter).
-		QueryContext(resp.Context())
+		QueryContext(ctx)
 	if err != nil {
 		return err
 	}
