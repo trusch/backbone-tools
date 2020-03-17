@@ -9,14 +9,14 @@ import (
 
 	"github.com/Masterminds/squirrel"
 	dbtypes "github.com/contiamo/go-base/pkg/db/serialization"
-	"github.com/trusch/backbone-tools/pkg/api"
-	"github.com/trusch/backbone-tools/pkg/sqlizers"
-	"github.com/trusch/backbone-tools/pkg/ticker"
+	"github.com/contiamo/go-base/pkg/tracing"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/jackc/pgx/v4"
 	"github.com/pkg/errors"
 	uuid "github.com/satori/go.uuid"
-	"github.com/sirupsen/logrus"
+	"github.com/trusch/backbone-tools/pkg/api"
+	"github.com/trusch/backbone-tools/pkg/sqlizers"
+	"github.com/trusch/backbone-tools/pkg/ticker"
 )
 
 var (
@@ -24,11 +24,16 @@ var (
 )
 
 func NewServer(ctx context.Context, db *sql.DB, connectString string) (api.EventsServer, error) {
-	srv := &eventsServer{db, connectString}
+	srv := &eventsServer{
+		Tracer:        tracing.NewTracer("events", "EventsServer"),
+		db:            db,
+		connectString: connectString,
+	}
 	return srv, srv.init(ctx)
 }
 
 type eventsServer struct {
+	tracing.Tracer
 	db            squirrel.StdSqlCtx
 	connectString string
 }
@@ -53,8 +58,15 @@ func (s *eventsServer) getBuilder(db squirrel.BaseRunner) squirrel.StatementBuil
 		RunWith(db)
 }
 
-func (s *eventsServer) Publish(ctx context.Context, req *api.PublishRequest) (*api.Event, error) {
-	logrus.Infof("publish event %+v", req)
+func (s *eventsServer) Publish(ctx context.Context, req *api.PublishRequest) (event *api.Event, err error) {
+	span, ctx := s.StartSpan(ctx, "Publish")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+
+	span.SetTag("topic", req.GetTopic())
+	span.SetTag("labels", req.GetLabels())
+	span.SetTag("payload", req.GetPayload())
 
 	id := uuid.NewV4().String()
 	now := time.Now()
@@ -105,21 +117,26 @@ func (s *eventsServer) Publish(ctx context.Context, req *api.PublishRequest) (*a
 
 }
 
-func (s *eventsServer) Subscribe(req *api.SubscribeRequest, resp api.Events_SubscribeServer) error {
-	notifyConn, err := pgx.Connect(resp.Context(), s.connectString)
+func (s *eventsServer) Subscribe(req *api.SubscribeRequest, resp api.Events_SubscribeServer) (err error) {
+	span, ctx := s.StartSpan(resp.Context(), "Subscribe")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+
+	notifyConn, err := pgx.Connect(ctx, s.connectString)
 	if err != nil {
 		return err
 	}
 	ticker := ticker.New(pollInterval, 0.1, notifyConn, "events_"+strings.Replace(req.GetTopic(), "-", "_", -1))
-	if err := ticker.Start(resp.Context()); err != nil {
+	if err := ticker.Start(ctx); err != nil {
 		return err
 	}
 	lastSequence := req.GetSinceSequence()
 	timestamp := req.GetSinceCreatedAt()
 	for {
 		select {
-		case <-resp.Context().Done():
-			return resp.Context().Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-ticker.C:
 			filter := squirrel.And{
 				squirrel.Eq{
@@ -150,7 +167,7 @@ func (s *eventsServer) Subscribe(req *api.SubscribeRequest, resp api.Events_Subs
 				Select("event_id", "labels", "payload", "created_at", "sequence").
 				From("events").
 				Where(filter).
-				QueryContext(resp.Context())
+				QueryContext(ctx)
 			if err != nil {
 				return err
 			}
@@ -168,9 +185,14 @@ func (s *eventsServer) Subscribe(req *api.SubscribeRequest, resp api.Events_Subs
 				if err != nil {
 					return err
 				}
+				span, _ := s.StartSpan(ctx, "sendEvent")
 				err = resp.Send(&event)
 				lastSequence = event.Sequence
 				timestamp = nil
+				s.FinishSpan(span, err)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}

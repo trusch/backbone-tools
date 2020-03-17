@@ -7,9 +7,10 @@ import (
 	"time"
 
 	"github.com/Masterminds/squirrel"
+	"github.com/contiamo/go-base/pkg/tracing"
+	"github.com/jackc/pgx/v4"
 	"github.com/trusch/backbone-tools/pkg/api"
 	"github.com/trusch/backbone-tools/pkg/ticker"
-	"github.com/jackc/pgx/v4"
 )
 
 var (
@@ -18,11 +19,16 @@ var (
 )
 
 func NewServer(ctx context.Context, db *sql.DB, connectString string) (api.LocksServer, error) {
-	srv := &locksServer{db, connectString}
+	srv := &locksServer{
+		Tracer:        tracing.NewTracer("locks", "LocksServer"),
+		db:            db,
+		connectString: connectString,
+	}
 	return srv, srv.init(ctx)
 }
 
 type locksServer struct {
+	tracing.Tracer
 	db            squirrel.StdSqlCtx
 	connectString string
 }
@@ -43,7 +49,13 @@ func (s *locksServer) getBuilder(db squirrel.StdSqlCtx) squirrel.StatementBuilde
 		RunWith(db)
 }
 
-func (s *locksServer) Aquire(ctx context.Context, req *api.AquireRequest) (*api.AquireResponse, error) {
+func (s *locksServer) Aquire(ctx context.Context, req *api.AquireRequest) (resp *api.AquireResponse, err error) {
+	span, ctx := s.StartSpan(ctx, "Aquire")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("lock_id", req.GetId())
+
 	notifyConn, err := pgx.Connect(ctx, s.connectString)
 	if err != nil {
 		return nil, err
@@ -95,16 +107,28 @@ func (s *locksServer) Aquire(ctx context.Context, req *api.AquireRequest) (*api.
 	}
 }
 
-func (s *locksServer) Hold(ctx context.Context, req *api.HoldRequest) (*api.HoldResponse, error) {
-	_, err := s.getBuilder(s.db).Update("locks").Set("updated_at", time.Now()).ExecContext(ctx)
+func (s *locksServer) Hold(ctx context.Context, req *api.HoldRequest) (resp *api.HoldResponse, err error) {
+	span, ctx := s.StartSpan(ctx, "Hold")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("lock_id", req.GetId())
+
+	_, err = s.getBuilder(s.db).Update("locks").Set("updated_at", time.Now()).ExecContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return &api.HoldResponse{Id: req.GetId()}, nil
 }
 
-func (s *locksServer) Release(ctx context.Context, req *api.ReleaseRequest) (*api.ReleaseResponse, error) {
-	_, err := s.getBuilder(s.db).Update("locks").Set("updated_at", time.Time{}).ExecContext(ctx)
+func (s *locksServer) Release(ctx context.Context, req *api.ReleaseRequest) (resp *api.ReleaseResponse, err error) {
+	span, ctx := s.StartSpan(ctx, "Release")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("lock_id", req.GetId())
+
+	_, err = s.getBuilder(s.db).Update("locks").Set("updated_at", time.Time{}).ExecContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -117,12 +141,18 @@ func (s *locksServer) Release(ctx context.Context, req *api.ReleaseRequest) (*ap
 
 var errLocked = errors.New("can't get lock")
 
-func (s *locksServer) getLock(ctx context.Context, id string) error {
+func (s *locksServer) getLock(ctx context.Context, id string) (err error) {
+	span, ctx := s.StartSpan(ctx, "tryGetLock")
+	defer func() {
+		s.FinishSpan(span, err)
+	}()
+	span.SetTag("lock_id", id)
+
 	var (
 		lockID    string
 		updatedAt time.Time
 	)
-	err := s.getBuilder(s.db).Select("lock_id", "updated_at").From("locks").Where(squirrel.Eq{
+	err = s.getBuilder(s.db).Select("lock_id", "updated_at").From("locks").Where(squirrel.Eq{
 		"lock_id": id,
 	}).QueryRowContext(ctx).Scan(&lockID, &updatedAt)
 	if err != nil {
@@ -150,5 +180,5 @@ func (s *locksServer) getLock(ctx context.Context, id string) error {
 }
 
 func (s *locksServer) withTx(tx *sql.Tx) *locksServer {
-	return &locksServer{tx, s.connectString}
+	return &locksServer{s.Tracer, tx, s.connectString}
 }

@@ -86,7 +86,7 @@ func (s *cronjobsServer) Create(ctx context.Context, req *api.CreateCronJobReque
 	span.SetTag("name", req.GetName())
 	span.SetTag("cron", req.GetCron())
 	span.SetTag("queue", req.GetQueue())
-	span.SetTag("spec", req.GetSpec())
+	span.SetTag("spec", string(req.GetSpec()))
 	span.SetTag("labels", req.GetLabels())
 
 	id := uuid.NewV4().String()
